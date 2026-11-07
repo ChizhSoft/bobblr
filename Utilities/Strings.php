@@ -14,6 +14,38 @@ class Strings
         return trim(stripslashes(htmlspecialchars($string)));
     }
 
+    /**
+     * Permit only web, email and internal links in user-created HTML.
+     * Never allow executable URL schemes such as javascript: or data:.
+     */
+    public function is_safe_href(string $href): bool
+    {
+        $href = trim($href);
+        if ($href === '' || preg_match('/[\x00-\x20\x7F]/', $href)) {
+            return false;
+        }
+
+        if (str_starts_with($href, '#') || str_starts_with($href, '?')) {
+            return true;
+        }
+
+        if (str_starts_with($href, '/') && !str_starts_with($href, '//') && !str_starts_with($href, '/\\')) {
+            return true;
+        }
+
+        $parts = parse_url($href);
+        if (!is_array($parts) || !isset($parts['scheme'])) {
+            return false;
+        }
+
+        $scheme = strtolower($parts['scheme']);
+        if (in_array($scheme, ['http', 'https'], true)) {
+            return !empty($parts['host']);
+        }
+
+        return $scheme === 'mailto' && !empty($parts['path']);
+    }
+
     public function random_string(int $length): string
     {
         $characters = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -40,6 +72,17 @@ class Strings
         $dom->loadHTML(mb_convert_encoding($html_content, 'HTML-ENTITIES', "UTF-8"));
         $dom->preserveWhiteSpace = false;
         $dom->formatOutput = true;
+        // Check previously stored HTML too; strip executable attributes on output.
+        foreach(iterator_to_array($dom->getElementsByTagName('*')) as $element){
+            foreach(iterator_to_array($element->attributes) as $attr){
+                $name = strtolower($attr->nodeName);
+                if(str_starts_with($name, 'on') || $name === 'srcdoc'
+                    || ($name === 'href' && !$this->is_safe_href($attr->nodeValue))
+                    || ($element->nodeName === 'iframe' && $name === 'src')){
+                    $element->removeAttribute($attr->nodeName);
+                }
+            }
+        }
         foreach($dom->getElementsByTagName('img') as $img){
             if($img->hasAttributes()){
                 $img->setAttribute('loading', 'lazy');
@@ -70,7 +113,8 @@ class Strings
                     if($attr->nodeName == 'data-originalsrc'){
                         $original_source = $attr->nodeValue;
                         $whitelist_websites = ["www.youtube.com", "youtube.com", "soundcloud.com"];
-                        if(in_array(parse_url($original_source)['host'], $whitelist_websites)){
+                        if(parse_url($original_source, PHP_URL_SCHEME) === 'https'
+                            && in_array(parse_url($original_source, PHP_URL_HOST), $whitelist_websites, true)){
                             $iframe->setAttribute("loading", "lazy");
                             if(parse_url($original_source)['host'] == 'soundcloud.com' || parse_url($original_source)['host'] == 'www.soundcloud.com'){
                                 $iframe->setAttribute("src", "https://w.soundcloud.com/player/?url=".$original_source."&auto_play=false&hide_related=false&show_comments=true&show_user=true&show_reposts=false&show_teaser=true&visual=true");
@@ -197,7 +241,7 @@ class Strings
             }else if($element->nodeName == 'iframe'){
                 if($element->hasAttributes()){
                     $original_source = '';
-                    foreach($element->attributes as $attr){
+                    foreach(iterator_to_array($element->attributes) as $attr){
                         $name = $attr->nodeName;
                         $value = $attr->nodeValue;
                         if($name == 'data-originalsrc'){
@@ -208,7 +252,8 @@ class Strings
                         $element->removeAttribute($element->attributes->item(0)->name);
                     }
                     $whitelist_websites = ["www.soundcloud.com", "soundcloud.com", "www.youtube.com", "youtube.com"];
-                    if(in_array(parse_url($original_source)['host'], $whitelist_websites)){
+                    if(parse_url($original_source, PHP_URL_SCHEME) === 'https'
+                            && in_array(parse_url($original_source, PHP_URL_HOST), $whitelist_websites, true)){
                         $element->setAttribute("data-originalsrc", $original_source);
                         $element->setAttribute("allowfullscreen", "true");
                     }else{
@@ -220,7 +265,7 @@ class Strings
             }else if($element->nodeName == 'audio'){
                 if($element->hasAttributes()){
                     $attrs = ["src" => "", "data-cover" => "", "data-name" => ""];
-                    foreach($element->attributes as $attr){
+                    foreach(iterator_to_array($element->attributes) as $attr){
                         $name = $attr->nodeName;
                         $value = $attr->nodeValue;
                         if(in_array($name, ["src", "data-cover", "data-name"])){
@@ -253,7 +298,7 @@ class Strings
                 }
             }else{
                 if($element->hasAttributes()){
-                    foreach($element->attributes as $attr){
+                    foreach(iterator_to_array($element->attributes) as $attr){
                         $name = $attr->nodeName;
                         $value = $attr->nodeValue;
                         if($name == 'data-ignore'){
@@ -265,7 +310,7 @@ class Strings
                             if($name == "class" && !in_array($value, ["content_quote", "content_dialogue"])){
                                 $element->removeAttribute($name);
                             }
-                            if($name == "href" && str_contains($value, "javascript:")){
+                            if($name == "href" && !$this->is_safe_href($value)){
                                 $element->removeAttribute($name);
                             }
                             if($name == "style"){
