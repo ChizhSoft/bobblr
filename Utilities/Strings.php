@@ -14,6 +14,58 @@ class Strings
         return trim(stripslashes(htmlspecialchars($string)));
     }
 
+    /**
+     * Permit only web, email and internal links in user-created HTML.
+     * Never allow executable URL schemes such as javascript: or data:.
+     */
+    public function is_safe_href(string $href): bool
+    {
+        $href = trim($href);
+        if ($href === '' || preg_match('/[\x00-\x20\x7F]/', $href)) {
+            return false;
+        }
+
+        if (str_starts_with($href, '#') || str_starts_with($href, '?')) {
+            return true;
+        }
+
+        if (str_starts_with($href, '/') && !str_starts_with($href, '//') && !str_starts_with($href, '/\\')) {
+            return true;
+        }
+
+        $parts = parse_url($href);
+        if (!is_array($parts) || !isset($parts['scheme'])) {
+            return false;
+        }
+
+        $scheme = strtolower($parts['scheme']);
+        if (in_array($scheme, ['http', 'https'], true)) {
+            return !empty($parts['host']);
+        }
+
+        return $scheme === 'mailto' && !empty($parts['path']);
+    }
+
+    /**
+     * Convert only locally uploaded media URLs to safe paths.
+     * Reject arbitrary hosts, query strings, traversal and nested folders.
+     */
+    public function get_local_upload_path(string $url): ?string
+    {
+        if (str_starts_with($url, '/uploads/')) {
+            $path = $url;
+        } elseif (defined('BASE_URL') && str_starts_with($url, rtrim(BASE_URL, '/').'/uploads/')) {
+            $path = substr($url, strlen(rtrim(BASE_URL, '/')));
+        } else {
+            return null;
+        }
+        if (str_contains($path, '..')
+            || !preg_match('~^/uploads/[A-Za-z0-9_-][A-Za-z0-9._-]*\.(?:jpe?g|png|gif|mp3|mp4)$~Di', $path)) {
+            return null;
+        }
+        return $path;
+    }
+
     public function random_string(int $length): string
     {
         $characters = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -27,19 +79,30 @@ class Strings
 
     public function check_srcs_of_media(string $postID, string $content): string
     {
-        $media_srcs = (new Strings())->get_imgs_video_src($content);
+        $media_srcs = $this->get_imgs_video_src($content);
         $not_exists = [];
-        foreach($media_srcs as $media_src){
-            if(!file_exists($_SERVER['DOCUMENT_ROOT'].'/Web/public'.parse_url($media_src)['path'])){
+        foreach ($media_srcs as $media_src) {
+            $localPath = $this->get_local_upload_path($media_src);
+            if ($localPath === null || !is_file($_SERVER['DOCUMENT_ROOT'].'/Web/public'.$localPath)) {
                 $not_exists[] = $media_src;
             }
         }
         $html_content = strip_tags($content, ["p", "h1", "h2", "h3", "h4", "h5", "h6", "img", "video", "span", "a", "b", "i", "u", "br", "iframe", "audio"]);
-        preg_replace('/(<.+?)(?<=\s)on[a-z]+\s*=\s*(?:([\'"])(?!\2).+?\2|(?:\S+?\(.*?\)(?=[\s>])))(.*?>)/i', "$1 $3", $html_content);
         $dom = new DOMDocument('1.0', 'UTF-8');
         $dom->loadHTML(mb_convert_encoding($html_content, 'HTML-ENTITIES', "UTF-8"));
         $dom->preserveWhiteSpace = false;
         $dom->formatOutput = true;
+        // Check previously stored HTML too; strip executable attributes on output.
+        foreach(iterator_to_array($dom->getElementsByTagName('*')) as $element){
+            foreach(iterator_to_array($element->attributes) as $attr){
+                $name = strtolower($attr->nodeName);
+                if(str_starts_with($name, 'on') || $name === 'srcdoc'
+                    || ($name === 'href' && !$this->is_safe_href($attr->nodeValue))
+                    || ($element->nodeName === 'iframe' && $name === 'src')){
+                    $element->removeAttribute($attr->nodeName);
+                }
+            }
+        }
         foreach($dom->getElementsByTagName('img') as $img){
             if($img->hasAttributes()){
                 $img->setAttribute('loading', 'lazy');
@@ -47,15 +110,18 @@ class Strings
                     if($attr->nodeName == 'src'){
                         if(in_array($attr->nodeValue, $not_exists)){
                             $attr->nodeValue = '/static/images/image_corrupted.png';
-                        }else if(str_starts_with($attr->nodeValue, BASE_URL) && $attr->nodeValue != '/static/images/image_corrupted.png'){
-                            $binary_data = file_get_contents($attr->nodeValue);
-                            $im = imagecreatefromstring($binary_data);
-                            $img->setAttribute('width', "540");
-                            $img->setAttribute('height', (string)(540/(imagesx($im)/imagesy($im))));
-                            $gradient = ["linear-gradient(132deg, #3b1e89, #f793ff)", "linear-gradient(132deg, #1e8982, #93ffcd)", "linear-gradient(132deg, #891e1e, #ff9393)", "linear-gradient(132deg, #1e4b89, #93d2ff)"];
-                            $img->setAttribute('style', "background: ".$gradient[rand(0,4)]);
-                            if(pathinfo($attr->nodeValue)['extension'] != 'gif'){
-                                $img->setAttribute('src', $attr->nodeValue."/w800-compressed.jpeg");
+                        }else if(($localPath = $this->get_local_upload_path($attr->nodeValue)) !== null){
+                            // Never fetch our own website over HTTP just to inspect an image.
+                            $imagePath = $_SERVER['DOCUMENT_ROOT'].'/Web/public'.$localPath;
+                            $dimensions = @getimagesize($imagePath);
+                            if ($dimensions !== false && $dimensions[0] > 0 && $dimensions[1] > 0) {
+                                $img->setAttribute('width', '540');
+                                $img->setAttribute('height', (string) round(540 * $dimensions[1] / $dimensions[0]));
+                                $gradient = ["linear-gradient(132deg, #3b1e89, #f793ff)", "linear-gradient(132deg, #1e8982, #93ffcd)", "linear-gradient(132deg, #891e1e, #ff9393)", "linear-gradient(132deg, #1e4b89, #93d2ff)"];
+                                $img->setAttribute('style', 'background: '.$gradient[array_rand($gradient)]);
+                                if (strtolower(pathinfo($localPath, PATHINFO_EXTENSION)) !== 'gif') {
+                                    $img->setAttribute('src', rtrim(BASE_URL, '/').$localPath.'/w800-compressed.jpeg');
+                                }
                             }
                         }
                     }
@@ -70,7 +136,8 @@ class Strings
                     if($attr->nodeName == 'data-originalsrc'){
                         $original_source = $attr->nodeValue;
                         $whitelist_websites = ["www.youtube.com", "youtube.com", "soundcloud.com"];
-                        if(in_array(parse_url($original_source)['host'], $whitelist_websites)){
+                        if(parse_url($original_source, PHP_URL_SCHEME) === 'https'
+                            && in_array(parse_url($original_source, PHP_URL_HOST), $whitelist_websites, true)){
                             $iframe->setAttribute("loading", "lazy");
                             if(parse_url($original_source)['host'] == 'soundcloud.com' || parse_url($original_source)['host'] == 'www.soundcloud.com'){
                                 $iframe->setAttribute("src", "https://w.soundcloud.com/player/?url=".$original_source."&auto_play=false&hide_related=false&show_comments=true&show_user=true&show_reposts=false&show_teaser=true&visual=true");
@@ -97,6 +164,12 @@ class Strings
                 $video->parentNode->removeChild($video);
             }
         }
+        foreach(iterator_to_array($dom->getElementsByTagName('audio')) as $audio){
+            if (!$audio->hasAttribute('src')
+                || $this->get_local_upload_path($audio->getAttribute('src')) === null) {
+                $audio->parentNode->removeChild($audio);
+            }
+        }
         $result_html = (!empty($html_content) ? preg_replace('~<(?:!DOCTYPE|/?(?:html|body))[^>]*>\s*~i', '', $dom->saveHTML($dom->documentElement)) : "");
         if(count($not_exists) > 0 && $postID != ''){
             $GLOBALS['db']->query("UPDATE zhabs SET zhabContent = ? WHERE zhabURLID = ?", $result_html, $postID);
@@ -107,7 +180,6 @@ class Strings
     public function get_imgs_video_src(string $html_content): array
     {
         $html_content = strip_tags($html_content, ['img', 'video', 'audio']);
-        preg_replace('/(<.+?)(?<=\s)on[a-z]+\s*=\s*(?:([\'"])(?!\2).+?\2|(?:\S+?\(.*?\)(?=[\s>])))(.*?>)/i', "$1 $3", $html_content);
         $dom = new DOMDocument('1.0', 'UTF-8');
         $dom->loadHTML(mb_convert_encoding($html_content, 'HTML-ENTITIES', "UTF-8"));
         $dom->preserveWhiteSpace = false;
@@ -157,7 +229,6 @@ class Strings
     public function get_img_src(string $html_content): string
     {
         $html_content = strip_tags($html_content, ['img', 'video']);
-        preg_replace('/(<.+?)(?<=\s)on[a-z]+\s*=\s*(?:([\'"])(?!\2).+?\2|(?:\S+?\(.*?\)(?=[\s>])))(.*?>)/i', "$1 $3", $html_content);
         $dom = new DOMDocument('1.0', 'UTF-8');
         $dom->loadHTML(mb_convert_encoding($html_content, 'HTML-ENTITIES', "UTF-8"));
         $dom->preserveWhiteSpace = false;
@@ -166,7 +237,7 @@ class Strings
         if($img && $img->hasAttributes()){
             foreach($img->attributes as $attr){
                 if($attr->nodeName == 'src'){
-                    return $attr->nodeValue;
+                    return ($this->get_local_upload_path($attr->nodeValue) !== null ? $attr->nodeValue : '');
                 }
             }
         }else{
@@ -177,7 +248,6 @@ class Strings
     public function prepare_post_text(string $string): string
     {
         $string = strip_tags($string, ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'b', 'i', 'u', 'a', 'strong', 'span', 'img', 'video', 'iframe', 'audio']);
-        preg_replace('/(<.+?)(?<=\s)on[a-z]+\s*=\s*(?:([\'"])(?!\2).+?\2|(?:\S+?\(.*?\)(?=[\s>])))(.*?>)/i', "$1 $3", $string);
         $dom = new DOMDocument('1.0', 'UTF-8');
         $dom->loadHTML(mb_convert_encoding($string, 'HTML-ENTITIES', "UTF-8"));
         $dom->preserveWhiteSpace = false;
@@ -197,7 +267,7 @@ class Strings
             }else if($element->nodeName == 'iframe'){
                 if($element->hasAttributes()){
                     $original_source = '';
-                    foreach($element->attributes as $attr){
+                    foreach(iterator_to_array($element->attributes) as $attr){
                         $name = $attr->nodeName;
                         $value = $attr->nodeValue;
                         if($name == 'data-originalsrc'){
@@ -208,7 +278,8 @@ class Strings
                         $element->removeAttribute($element->attributes->item(0)->name);
                     }
                     $whitelist_websites = ["www.soundcloud.com", "soundcloud.com", "www.youtube.com", "youtube.com"];
-                    if(in_array(parse_url($original_source)['host'], $whitelist_websites)){
+                    if(parse_url($original_source, PHP_URL_SCHEME) === 'https'
+                            && in_array(parse_url($original_source, PHP_URL_HOST), $whitelist_websites, true)){
                         $element->setAttribute("data-originalsrc", $original_source);
                         $element->setAttribute("allowfullscreen", "true");
                     }else{
@@ -220,7 +291,7 @@ class Strings
             }else if($element->nodeName == 'audio'){
                 if($element->hasAttributes()){
                     $attrs = ["src" => "", "data-cover" => "", "data-name" => ""];
-                    foreach($element->attributes as $attr){
+                    foreach(iterator_to_array($element->attributes) as $attr){
                         $name = $attr->nodeName;
                         $value = $attr->nodeValue;
                         if(in_array($name, ["src", "data-cover", "data-name"])){
@@ -253,7 +324,7 @@ class Strings
                 }
             }else{
                 if($element->hasAttributes()){
-                    foreach($element->attributes as $attr){
+                    foreach(iterator_to_array($element->attributes) as $attr){
                         $name = $attr->nodeName;
                         $value = $attr->nodeValue;
                         if($name == 'data-ignore'){
@@ -265,7 +336,7 @@ class Strings
                             if($name == "class" && !in_array($value, ["content_quote", "content_dialogue"])){
                                 $element->removeAttribute($name);
                             }
-                            if($name == "href" && str_contains($value, "javascript:")){
+                            if($name == "href" && !$this->is_safe_href($value)){
                                 $element->removeAttribute($name);
                             }
                             if($name == "style"){
@@ -275,7 +346,12 @@ class Strings
                                 }
                             }
                             if($name == "src"){
-                                $element->setAttribute('src', substr(BASE_URL, 0, -1).$value);
+                                if (in_array($element->nodeName, ['img', 'video'], true)
+                                    && $this->get_local_upload_path($value) !== null) {
+                                    $element->setAttribute('src', rtrim(BASE_URL, '/').$this->get_local_upload_path($value));
+                                } else {
+                                    $element->removeAttribute($name);
+                                }
                             }
                         }
                     }

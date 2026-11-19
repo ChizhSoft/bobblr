@@ -265,8 +265,13 @@ class Posts
         if($post->zhabBy == $user->userID || $user->admin == 1){
             $srcs = (new Strings())->get_imgs_video_src($post->zhabContent);
             foreach($srcs as $src){
-                if(str_starts_with(parse_url($src)['path'], "/uploads")){
-                    unlink($_SERVER['DOCUMENT_ROOT'].'/Web/public'.parse_url($src)['path']);
+                // Never derive an unlink() target directly from post HTML.
+                $localPath = (new Strings())->get_local_upload_path($src);
+                if ($localPath !== null) {
+                    $filePath = $_SERVER['DOCUMENT_ROOT'].'/Web/public'.$localPath;
+                    if (is_file($filePath)) {
+                        @unlink($filePath);
+                    }
                 }
             }
             $GLOBALS['db']->query("DELETE FROM comments WHERE commentTo = ?", $id);

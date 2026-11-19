@@ -1,0 +1,40 @@
+name: Bobblr security checks
+
+on:
+  push:
+    branches: [security-hardening]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  php-security-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Configure PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: dom, mbstring, gd, fileinfo, exif
+          coverage: none
+      - name: PHP syntax checks
+        run: |
+          php -l Utilities/Strings.php
+          php -l Utilities/Files.php
+          php -l Web/Models/Posts.php
+          php -l tests/security/safe_href_test.php
+          php -l tests/security/local_upload_path_test.php
+          php -l tests/security/upload_policy_test.php
+          php -l tests/security/post_html_test.php
+      - name: Security regression tests
+        run: |
+          php tests/security/safe_href_test.php
+          php tests/security/local_upload_path_test.php
+          php tests/security/upload_policy_test.php
+          php tests/security/post_html_test.php
