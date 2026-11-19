@@ -1,0 +1,7 @@
+# Defense in depth: uploaded content must never execute server-side scripts.
+# The upload handlers also use generated filenames and fixed extensions.
+Options -Indexes -ExecCGI
+
+<FilesMatch "\.(?:php[0-9]*|phtml|phar|cgi|pl|py|sh|shtml)$">
+    Require all denied
+</FilesMatch>
