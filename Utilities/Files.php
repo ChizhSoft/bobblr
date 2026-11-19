@@ -233,26 +233,38 @@ class Files
         return $returnCode !== 0 ? 'error' : '';
     }
 
-	public function convertImage(string $originalImage, string $outputImage, int $quality): void 
-	{
-	    $exploded = explode('.',$originalImage);
-	    $ext = $exploded[count($exploded) - 1]; 
+    public function convertImage(string $originalImage, string $outputImage, int $quality): void
+    {
+        // An image header is not proof that the whole file can be decoded.
+        $info = @getimagesize($originalImage);
+        if ($info === false) {
+            @unlink($originalImage);
+            return;
+        }
 
-	    if(preg_match('/jpg|jpeg/i',$ext)){
-			$imageTmp = @imagecreatefromjpeg($originalImage);
-		}else if(preg_match('/png/i',$ext)){
-			$imageTmp = @imagecreatefrompng($originalImage);
-		}else if(preg_match('/gif/i',$ext)){
-			$imageTmp = @imagecreatefromgif($originalImage);
-		}else if(preg_match('/bmp/i',$ext)){
-			$imageTmp = @imagecreatefrombmp($originalImage);
-		}else{
-			die;
-		}
-
-	    imagejpeg($imageTmp, $outputImage, $quality);
-	    imagedestroy($imageTmp);
-
-		unlink($originalImage);
-	}
+        $image = false;
+        try {
+            switch ($info[2]) {
+                case IMAGETYPE_JPEG:
+                    $image = @imagecreatefromjpeg($originalImage);
+                    break;
+                case IMAGETYPE_PNG:
+                    $image = @imagecreatefrompng($originalImage);
+                    break;
+                case IMAGETYPE_GIF:
+                    $image = @imagecreatefromgif($originalImage);
+                    break;
+            }
+            if ($image !== false) {
+                @imagejpeg($image, $outputImage, $quality);
+            }
+        } catch (\Throwable $ignored) {
+            // Caller checks if the output image exists before reporting success.
+        } finally {
+            if ($image !== false) {
+                imagedestroy($image);
+            }
+            @unlink($originalImage);
+        }
+    }
 }
